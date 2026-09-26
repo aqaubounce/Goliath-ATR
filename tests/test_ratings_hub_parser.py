@@ -1,6 +1,42 @@
 import unittest
+from pathlib import Path
 
 from src.ratings_hub.parser import parse_ratings_hub
+
+
+ATR_TWO_ROW_TABLE = """
+<table class="table-sortable ratings-hub js-table-sortable-initialised">
+  <thead>
+    <tr class="ratings-hub-main-header">
+      <th class="ratings-hub-race-title">R1 12:00 Testcourse</th>
+      <th colspan="2" class="ratings-hub-official-rating">Official Rating</th>
+      <th class="ratings-hub-speed">Speed</th>
+      <th class="ratings-hub-atr-form">Form</th>
+      <th colspan="5" class="ratings-hub-attributes">Attributes</th>
+      <th class="ratings-hub-form-plus">Form Plus</th>
+    </tr>
+    <tr>
+      <th data-sort="cloth">No. &amp; Horsename</th>
+      <th data-sort="ortoday" class="ratings-hub-official-rating">Current</th>
+      <th class="ratings-hub-official-rating">Last Win</th>
+      <th data-sort="speedtoday" class="ratings-hub-speed">Current</th>
+      <th data-sort="ability" class="ratings-hub-atr-form">Current</th>
+      <th class="ratings-hub-attributes ratings-hub-attributes--first">Scope</th>
+      <th class="ratings-hub-attributes">CondsConditions</th>
+      <th class="ratings-hub-attributes">TrTrainer</th>
+      <th class="ratings-hub-attributes">JyJockey</th>
+      <th class="ratings-hub-attributes">Attitude</th>
+      <th data-sort="formplus" class="ratings-hub-form-plus">Today</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr data-cloth="3" data-ortoday="92" data-speedtoday="70" data-ability="80" data-formplus="95">
+      <td>3. Example Runner</td><td>92</td><td>88</td><td>70</td><td>80</td>
+      <td>75</td><td>85</td><td>60</td><td>65</td><td>90</td><td>95</td>
+    </tr>
+  </tbody>
+</table>
+"""
 
 
 class ParseRatingsHubTests(unittest.TestCase):
@@ -85,6 +121,46 @@ class ParseRatingsHubTests(unittest.TestCase):
         """
 
         self.assertEqual(parse_ratings_hub(html), [])
+
+    def test_parses_atr_two_row_headers_and_runner_data_attributes(self) -> None:
+        runner = parse_ratings_hub(ATR_TWO_ROW_TABLE)[0]
+
+        self.assertEqual(runner.horse_number, 3)
+        self.assertEqual(runner.horse_name, "Example Runner")
+        self.assertEqual(runner.official_rating, 92)
+        self.assertEqual(runner.last_winning_rating, 88)
+        self.assertEqual(runner.speed, 70)
+        self.assertEqual(runner.form, 80)
+        self.assertEqual(runner.scope, 75)
+        self.assertEqual(runner.conditions, 85)
+        self.assertEqual(runner.trainer_attribute, 60)
+        self.assertEqual(runner.jockey_attribute, 65)
+        self.assertEqual(runner.attitude, 90)
+        self.assertEqual(runner.form_plus, 95)
+        self.assertEqual(runner.form_speed_average, 75)
+        self.assertEqual(runner.form_minus_speed, 10)
+        self.assertEqual(runner.form_plus_minus_form, 15)
+        self.assertEqual(runner.form_plus_minus_speed, 25)
+
+    def test_real_atr_snapshot_produces_runners(self) -> None:
+        snapshot = (
+            Path(__file__).resolve().parents[1]
+            / "data"
+            / "raw"
+            / "ratings_hub"
+            / "ratings_hub_snapshot.html"
+        )
+        runners = parse_ratings_hub(snapshot.read_text(encoding="utf-8"))
+
+        self.assertTrue(runners)
+        self.assertEqual(runners[0].horse_number, 8)
+        self.assertEqual(runners[0].horse_name, "Livio")
+        self.assertEqual(runners[0].official_rating, 122)
+        self.assertEqual(runners[0].speed, 121)
+        self.assertEqual(runners[0].form, 152)
+        self.assertEqual(runners[0].trainer_attribute, 1)
+        self.assertEqual(runners[0].jockey_attribute, 2)
+        self.assertEqual(runners[0].form_plus, 151)
 
 
 if __name__ == "__main__":
