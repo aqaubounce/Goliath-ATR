@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     source TEXT NOT NULL,
     captured_at TEXT NOT NULL,
     source_url TEXT,
-    notes TEXT
+    notes TEXT,
+    content_sha256 TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE IF NOT EXISTS races (
@@ -122,13 +123,23 @@ CREATE INDEX IF NOT EXISTS idx_results_runner
 """
 
 
-def initialise_database():
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def initialise_database(database_path: str | Path = DATABASE_PATH):
+    database_path = Path(database_path)
+    database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(DATABASE_PATH)
+    connection = sqlite3.connect(database_path)
 
     try:
         connection.executescript(SCHEMA)
+        snapshot_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(snapshots)")
+        }
+        if "content_sha256" not in snapshot_columns:
+            connection.execute("ALTER TABLE snapshots ADD COLUMN content_sha256 TEXT")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_content_sha256 "
+                "ON snapshots(content_sha256)"
+            )
         connection.commit()
     finally:
         connection.close()
