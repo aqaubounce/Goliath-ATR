@@ -53,6 +53,129 @@ def make_snapshot_html(
 </table>"""
 
 
+def create_legacy_database(database_path: Path, *, mismatched_rating: bool = False) -> None:
+    connection = sqlite3.connect(database_path)
+    connection.executescript(
+        """PRAGMA foreign_keys = ON;
+        CREATE TABLE snapshots (
+            snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            source_url TEXT,
+            notes TEXT,
+            content_sha256 TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE races (
+            race_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            race_date TEXT,
+            course TEXT NOT NULL,
+            race_time TEXT NOT NULL,
+            race_number INTEGER,
+            race_name TEXT,
+            class TEXT,
+            distance TEXT,
+            going TEXT,
+            surface TEXT,
+            field_size INTEGER,
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(snapshot_id),
+            UNIQUE(snapshot_id, course, race_time)
+        );
+        CREATE TABLE runners (
+            runner_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_id INTEGER NOT NULL,
+            horse_name TEXT NOT NULL,
+            horse_number INTEGER,
+            draw INTEGER,
+            weight TEXT,
+            jockey TEXT,
+            jockey_claim TEXT,
+            trainer TEXT,
+            current_odds TEXT,
+            non_runner INTEGER DEFAULT 0,
+            FOREIGN KEY (race_id) REFERENCES races(race_id),
+            UNIQUE(race_id, horse_name)
+        );
+        CREATE TABLE ratings_hub (
+            ratings_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            race_id INTEGER NOT NULL,
+            runner_id INTEGER NOT NULL,
+            official_rating INTEGER,
+            last_winning_rating INTEGER,
+            speed INTEGER,
+            form INTEGER,
+            scope INTEGER,
+            conditions INTEGER,
+            trainer_attribute INTEGER,
+            jockey_attribute INTEGER,
+            attitude INTEGER,
+            form_plus INTEGER,
+            form_speed_average REAL,
+            form_minus_speed INTEGER,
+            form_plus_minus_form INTEGER,
+            form_plus_minus_speed INTEGER,
+            FOREIGN KEY (snapshot_id) REFERENCES snapshots(snapshot_id),
+            FOREIGN KEY (race_id) REFERENCES races(race_id),
+            FOREIGN KEY (runner_id) REFERENCES runners(runner_id),
+            UNIQUE(snapshot_id, runner_id)
+        );
+        CREATE TABLE results (
+            result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_id INTEGER NOT NULL,
+            runner_id INTEGER NOT NULL,
+            finishing_position INTEGER,
+            result_text TEXT,
+            starting_price TEXT,
+            bsp REAL,
+            winner INTEGER DEFAULT 0,
+            placed INTEGER DEFAULT 0,
+            FOREIGN KEY (race_id) REFERENCES races(race_id),
+            FOREIGN KEY (runner_id) REFERENCES runners(runner_id),
+            UNIQUE(race_id, runner_id)
+        );"""
+    )
+    connection.execute(
+        "INSERT INTO snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        (17, "ATR", "2026-09-26T12:00:00Z", None, None, "legacy-hash"),
+    )
+    connection.executemany(
+        """INSERT INTO races
+           (race_id, snapshot_id, race_date, course, race_time, race_number)
+           VALUES (?, 17, '2026-09-26', 'Testcourse', ?, ?)""",
+        [(100, "12:00", 1), (101, "12:30", 2)],
+    )
+    connection.executemany(
+        "INSERT INTO runners (runner_id, race_id, horse_name, horse_number) VALUES (?, ?, ?, ?)",
+        [
+            (301, 100, "Returning Horse", 3),
+            (302, 101, "Returning Horse", 4),
+            (303, 101, "Unrated Horse", 9),
+        ],
+    )
+    second_rating_race_id = 100 if mismatched_rating else 101
+    connection.executemany(
+        """INSERT INTO ratings_hub
+           (ratings_id, snapshot_id, race_id, runner_id, official_rating,
+            last_winning_rating, speed, form, scope, conditions, trainer_attribute,
+            jockey_attribute, attitude, form_plus, form_speed_average,
+            form_minus_speed, form_plus_minus_form, form_plus_minus_speed)
+           VALUES (?, 17, ?, ?, ?, NULL, ?, ?, NULL, 85, 60, 65, 90, 95, NULL, NULL, 15, 25)""",
+        [
+            (401, 100, 301, 92, 70, 80),
+            (402, second_rating_race_id, 302, 88, 65, 75),
+        ],
+    )
+    connection.execute(
+        """INSERT INTO results
+           (result_id, race_id, runner_id, finishing_position, result_text,
+            starting_price, bsp, winner, placed)
+           VALUES (501, 100, 301, 1, 'Won', '5/1', 6.0, 1, 1)"""
+    )
+    connection.commit()
+    connection.close()
+
+
 class RatingsHubIngestionTests(unittest.TestCase):
     def ingest(
         self,
@@ -270,6 +393,92 @@ class RatingsHubIngestionTests(unittest.TestCase):
 
         self.assertIn("content_sha256", columns)
         self.assertIn("idx_snapshots_content_sha256", unique_indexes)
+
+    def test_composite_relationship_migration_preserves_data_and_rejects_mismatches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "legacy.db"
+            create_legacy_database(database_path)
+            connection = sqlite3.connect(database_path)
+            tables = ("snapshots", "races", "runners", "ratings_hub", "results")
+            before = {
+                table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                for table in tables
+            }
+            connection.close()
+
+            initialise_database(database_path)
+            initialise_database(database_path)
+
+            connection = sqlite3.connect(database_path)
+            connection.execute("PRAGMA foreign_keys = ON")
+            after = {
+                table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                for table in tables
+            }
+            self.assertEqual(after, before)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertEqual(
+                connection.execute(
+                    "SELECT runner_id, race_id FROM runners WHERE horse_name = 'Returning Horse' ORDER BY runner_id"
+                ).fetchall(),
+                [(301, 100), (302, 101)],
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT last_winning_rating FROM ratings_hub WHERE ratings_id = 401"
+                ).fetchone()[0]
+            )
+
+            connection.execute(
+                "INSERT INTO snapshots VALUES (18, 'ATR', '2026-09-27T12:00:00Z', NULL, NULL, 'second-hash')"
+            )
+            connection.execute(
+                "INSERT INTO races (race_id, snapshot_id, race_date, course, race_time) VALUES (102, 18, '2026-09-27', 'Testcourse', '12:00')"
+            )
+            connection.execute(
+                "INSERT INTO runners (runner_id, race_id, horse_name, horse_number) VALUES (304, 102, 'Other Horse', 1)"
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO ratings_hub (snapshot_id, race_id, runner_id) VALUES (17, 100, 303)"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO ratings_hub (snapshot_id, race_id, runner_id) VALUES (18, 100, 301)"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO results (race_id, runner_id) VALUES (100, 302)"
+                )
+            connection.close()
+
+    def test_composite_migration_rolls_back_on_existing_cross_race_rating(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "invalid-legacy.db"
+            create_legacy_database(database_path, mismatched_rating=True)
+
+            with self.assertRaises(sqlite3.IntegrityError):
+                initialise_database(database_path)
+
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0], 0
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT race_id, runner_id FROM ratings_hub WHERE ratings_id = 402"
+                    ).fetchone(),
+                    (100, 302),
+                )
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name = 'uq_races_snapshot_race_id'"
+                    ).fetchone()
+                )
+            finally:
+                connection.close()
 
 
 if __name__ == "__main__":
