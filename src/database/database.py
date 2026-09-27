@@ -136,6 +136,123 @@ CREATE INDEX IF NOT EXISTS idx_results_race
 
 CREATE INDEX IF NOT EXISTS idx_results_runner
     ON results(runner_id);
+
+CREATE TABLE IF NOT EXISTS racecard_race_details (
+    race_id INTEGER PRIMARY KEY,
+    race_type TEXT,
+    race_type_raw TEXT,
+    prize_money_value INTEGER,
+    prize_money_currency TEXT,
+    prize_money_raw TEXT,
+    age_restrictions TEXT,
+    age_restrictions_raw TEXT,
+    handicap_status TEXT,
+    handicap_status_raw TEXT,
+    each_way_terms_raw TEXT,
+    each_way_places INTEGER,
+    each_way_fraction TEXT,
+    place_terms_raw TEXT,
+    place_terms_json TEXT,
+    source_race_id TEXT,
+    source_race_url TEXT,
+    source_heading_raw TEXT,
+    raw_payload_json TEXT,
+    FOREIGN KEY (race_id) REFERENCES races(race_id)
+);
+
+CREATE TABLE IF NOT EXISTS racecard_runner_details (
+    runner_id INTEGER PRIMARY KEY,
+    age INTEGER,
+    sex TEXT,
+    owner TEXT,
+    official_rating INTEGER,
+    forecast_odds_decimal REAL,
+    current_odds_decimal REAL,
+    headgear TEXT,
+    form_normalized TEXT,
+    course_indicator INTEGER CHECK (course_indicator IN (0, 1) OR course_indicator IS NULL),
+    distance_indicator INTEGER CHECK (distance_indicator IN (0, 1) OR distance_indicator IS NULL),
+    course_distance_indicator INTEGER CHECK (course_distance_indicator IN (0, 1) OR course_distance_indicator IS NULL),
+    non_runner_reason TEXT,
+    horse_number_raw TEXT,
+    horse_name_raw TEXT,
+    draw_raw TEXT,
+    age_raw TEXT,
+    sex_raw TEXT,
+    weight_raw TEXT,
+    jockey_raw TEXT,
+    apprentice_claim_raw TEXT,
+    trainer_raw TEXT,
+    owner_raw TEXT,
+    official_rating_raw TEXT,
+    forecast_odds_raw TEXT,
+    current_odds_raw TEXT,
+    headgear_raw TEXT,
+    form_raw TEXT,
+    course_indicator_raw TEXT,
+    distance_indicator_raw TEXT,
+    course_distance_indicator_raw TEXT,
+    non_runner_status_raw TEXT,
+    raw_payload_json TEXT,
+    FOREIGN KEY (runner_id) REFERENCES runners(runner_id)
+);
+
+CREATE TABLE IF NOT EXISTS racecard_race_matches (
+    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    racecard_snapshot_id INTEGER NOT NULL,
+    racecard_race_id INTEGER NOT NULL,
+    ratings_snapshot_id INTEGER NOT NULL,
+    ratings_race_id INTEGER NOT NULL,
+    match_status TEXT NOT NULL CHECK (match_status IN ('matched', 'ambiguous', 'unmatched', 'manually_confirmed')),
+    match_method TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    evidence_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (racecard_snapshot_id, racecard_race_id)
+        REFERENCES races(snapshot_id, race_id),
+    FOREIGN KEY (ratings_snapshot_id, ratings_race_id)
+        REFERENCES races(snapshot_id, race_id),
+    UNIQUE (racecard_snapshot_id, racecard_race_id, ratings_snapshot_id, ratings_race_id)
+);
+
+CREATE TABLE IF NOT EXISTS racecard_runner_matches (
+    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    race_match_id INTEGER NOT NULL,
+    racecard_snapshot_id INTEGER NOT NULL,
+    racecard_race_id INTEGER NOT NULL,
+    racecard_runner_id INTEGER NOT NULL,
+    ratings_snapshot_id INTEGER NOT NULL,
+    ratings_race_id INTEGER NOT NULL,
+    ratings_runner_id INTEGER NOT NULL,
+    match_status TEXT NOT NULL CHECK (match_status IN ('matched', 'ambiguous', 'unmatched', 'manually_confirmed')),
+    match_method TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    evidence_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (race_match_id) REFERENCES racecard_race_matches(match_id),
+    FOREIGN KEY (racecard_snapshot_id, racecard_race_id)
+        REFERENCES races(snapshot_id, race_id),
+    FOREIGN KEY (racecard_race_id, racecard_runner_id)
+        REFERENCES runners(race_id, runner_id),
+    FOREIGN KEY (ratings_snapshot_id, ratings_race_id)
+        REFERENCES races(snapshot_id, race_id),
+    FOREIGN KEY (ratings_race_id, ratings_runner_id)
+        REFERENCES runners(race_id, runner_id),
+    UNIQUE (racecard_snapshot_id, racecard_race_id, racecard_runner_id,
+            ratings_snapshot_id, ratings_race_id, ratings_runner_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_racecard_race_matches_racecard
+    ON racecard_race_matches(racecard_snapshot_id, racecard_race_id);
+
+CREATE INDEX IF NOT EXISTS idx_racecard_race_matches_ratings
+    ON racecard_race_matches(ratings_snapshot_id, ratings_race_id);
+
+CREATE INDEX IF NOT EXISTS idx_racecard_runner_matches_racecard
+    ON racecard_runner_matches(racecard_snapshot_id, racecard_race_id, racecard_runner_id);
+
+CREATE INDEX IF NOT EXISTS idx_racecard_runner_matches_ratings
+    ON racecard_runner_matches(ratings_snapshot_id, ratings_race_id, ratings_runner_id);
 """
 
 
