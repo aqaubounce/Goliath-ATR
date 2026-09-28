@@ -1,13 +1,30 @@
 import re
+import plistlib
+from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
+from urllib.parse import urlsplit
+
+
+RATINGS_HUB_URL = "https://www.attheraces.com/tips/atr-tipsters/ratings-hub"
 
 
 class CollectorError(RuntimeError):
     """Raised when a source cannot safely provide Ratings Hub HTML."""
+
+
+class ChallengeResponseError(CollectorError):
+    """Raised when ATR returns a client or security challenge."""
+
+
+@dataclass(frozen=True)
+class AcquiredRatingsHubHTML:
+    html: str
+    source_format: str
+    source_url: str
 
 
 class _HTMLInspector(HTMLParser):
@@ -95,8 +112,13 @@ def _has_table_markup(html: str) -> bool:
 
 def _is_client_challenge(html: str) -> bool:
     inspector = _inspect_html(html)
-    searchable = unescape(f"{inspector.title or ''} {inspector.visible_text} {html}").lower()
-    return any(marker in searchable for marker in _CHALLENGE_MARKERS)
+    title = unescape(inspector.title or "").casefold()
+    visible_text = unescape(inspector.visible_text).casefold()
+    return "security challenge" in title or any(
+        marker in f"{title} {visible_text}"
+        for marker in _CHALLENGE_MARKERS
+        if marker != "security challenge"
+    )
 
 
 def load_html_file(path: str | Path) -> str:
@@ -140,7 +162,7 @@ def fetch_url(url: str) -> str:
         charset = error.headers.get_content_charset() or "utf-8"
         html = body.decode(charset, errors="replace")
         if _is_client_challenge(html):
-            raise CollectorError(
+            raise ChallengeResponseError(
                 f"HTTP {error.code}: the server returned a client or security challenge."
             ) from error
         raise CollectorError(f"HTTP request failed with status {error.code}.") from error
@@ -149,7 +171,7 @@ def fetch_url(url: str) -> str:
 
     html = body.decode(charset, errors="replace")
     if _is_client_challenge(html):
-        raise CollectorError(
+        raise ChallengeResponseError(
             f"HTTP {status}: the server returned a client or security challenge."
         )
     if not is_ratings_hub_html(html):
@@ -157,6 +179,64 @@ def fetch_url(url: str) -> str:
             f"HTTP {status}: the response does not contain a Ratings Hub table."
         )
     return html
+
+
+def load_webarchive_html(path: str | Path) -> AcquiredRatingsHubHTML:
+    """Extract and validate the actual ATR Ratings Hub WebMainResource."""
+    archive_path = Path(path)
+    try:
+        archive = plistlib.loads(archive_path.read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError) as error:
+        raise CollectorError("The supplied Safari WebArchive is not a readable plist archive.") from error
+    if not isinstance(archive, dict):
+        raise CollectorError("The supplied Safari WebArchive root is not a dictionary.")
+    resource = archive.get("WebMainResource")
+    if not isinstance(resource, dict):
+        raise CollectorError("The supplied Safari WebArchive has no WebMainResource.")
+    resource_data = resource.get("WebResourceData")
+    mime_type = resource.get("WebResourceMIMEType")
+    encoding = resource.get("WebResourceTextEncodingName")
+    source_url = resource.get("WebResourceURL")
+    if not isinstance(resource_data, bytes):
+        raise CollectorError("The WebMainResource has no byte data.")
+    if not isinstance(mime_type, str) or mime_type.split(";", 1)[0].strip().casefold() != "text/html":
+        raise CollectorError("The WebMainResource is not text/html.")
+    if not isinstance(encoding, str) or not encoding.strip():
+        raise CollectorError("The WebMainResource has no declared text encoding.")
+    if not isinstance(source_url, str) or not source_url.strip():
+        raise CollectorError("The WebMainResource has no source URL.")
+
+    actual_url = urlsplit(source_url)
+    expected_url = urlsplit(RATINGS_HUB_URL)
+    if (
+        actual_url.scheme.casefold() != "https"
+        or actual_url.hostname != expected_url.hostname
+        or actual_url.path.rstrip("/") != expected_url.path.rstrip("/")
+    ):
+        raise CollectorError("The WebMainResource URL is not the ATR Ratings Hub page.")
+    try:
+        html = resource_data.decode(encoding)
+    except (LookupError, UnicodeDecodeError) as error:
+        raise CollectorError(f"Unable to decode the WebMainResource using {encoding!r}.") from error
+    if _is_client_challenge(html):
+        raise ChallengeResponseError("The WebMainResource contains a client or security challenge.")
+    if not is_ratings_hub_html(html):
+        raise CollectorError("The WebMainResource does not contain a Ratings Hub table.")
+    return AcquiredRatingsHubHTML(html, "webarchive", source_url)
+
+
+def acquire_ratings_hub_html(
+    *,
+    webarchive_path: str | Path | None = None,
+) -> AcquiredRatingsHubHTML:
+    """Fetch genuine live HTML, falling back only to an explicitly supplied archive on challenge."""
+    try:
+        html = fetch_url(RATINGS_HUB_URL)
+    except ChallengeResponseError:
+        if webarchive_path is None:
+            raise
+        return load_webarchive_html(webarchive_path)
+    return AcquiredRatingsHubHTML(html, "html", RATINGS_HUB_URL)
 
 
 def describe_source(html: str) -> dict[str, str | int | bool | None]:

@@ -1,13 +1,18 @@
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.ratings_hub.collector import (
+    AcquiredRatingsHubHTML,
+    ChallengeResponseError,
     CollectorError,
+    acquire_ratings_hub_html,
     describe_source,
     fetch_url,
     is_ratings_hub_html,
+    load_webarchive_html,
     load_html_file,
     save_html,
 )
@@ -29,6 +34,15 @@ CLIENT_CHALLENGE_HTML = """<!doctype html>
 <html><head><title>Client Challenge</title></head><body>
 JavaScript is disabled in your browser. Please enable JavaScript to proceed.
 </body></html>"""
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CURRENT_WEBARCHIVE = (
+    PROJECT_ROOT
+    / "data"
+    / "raw"
+    / "ratings_hub"
+    / "Ratings Hub | Tips and Analysis | At The Races 3.webarchive"
+)
 
 
 class RatingsHubCollectorTests(unittest.TestCase):
@@ -54,6 +68,25 @@ class RatingsHubCollectorTests(unittest.TestCase):
     def test_recognises_ratings_hub_table_using_multiple_markers(self) -> None:
         self.assertTrue(is_ratings_hub_html(VALID_RATINGS_HUB_HTML))
 
+    def test_fetches_genuine_live_ratings_hub_html_unchanged(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        response.headers.get_content_charset.return_value = "utf-8"
+        response.read.return_value = VALID_RATINGS_HUB_HTML.encode("utf-8")
+
+        with patch("src.ratings_hub.collector.urlopen", return_value=response):
+            acquired = acquire_ratings_hub_html()
+
+        self.assertEqual(
+            acquired,
+            AcquiredRatingsHubHTML(
+                VALID_RATINGS_HUB_HTML,
+                "html",
+                "https://www.attheraces.com/tips/atr-tipsters/ratings-hub",
+            ),
+        )
+
     def test_rejects_client_challenge_response(self) -> None:
         response = MagicMock()
         response.__enter__.return_value = response
@@ -64,6 +97,70 @@ class RatingsHubCollectorTests(unittest.TestCase):
         with patch("src.ratings_hub.collector.urlopen", return_value=response):
             with self.assertRaisesRegex(CollectorError, "client or security challenge"):
                 fetch_url("https://example.test/ratings")
+
+    def test_challenge_without_archive_is_not_bypassed(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        response.headers.get_content_charset.return_value = "utf-8"
+        response.read.return_value = CLIENT_CHALLENGE_HTML.encode("utf-8")
+
+        with patch("src.ratings_hub.collector.urlopen", return_value=response):
+            with self.assertRaises(ChallengeResponseError):
+                acquire_ratings_hub_html()
+
+    def test_challenge_falls_back_to_synthetic_webarchive_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fallback.webarchive"
+            path.write_bytes(plistlib.dumps({
+                "WebMainResource": {
+                    "WebResourceData": VALID_RATINGS_HUB_HTML.encode("utf-8"),
+                    "WebResourceMIMEType": "text/html",
+                    "WebResourceTextEncodingName": "UTF-8",
+                    "WebResourceURL": "https://www.attheraces.com/tips/atr-tipsters/ratings-hub",
+                },
+            }))
+            with patch(
+                "src.ratings_hub.collector.fetch_url",
+                side_effect=ChallengeResponseError("client or security challenge"),
+            ):
+                acquired = acquire_ratings_hub_html(webarchive_path=path)
+
+        self.assertEqual(acquired.source_format, "webarchive")
+        self.assertEqual(acquired.html, VALID_RATINGS_HUB_HTML)
+
+    @unittest.skipUnless(CURRENT_WEBARCHIVE.is_file(), "current raw WebArchive is not present")
+    def test_challenge_falls_back_to_real_webarchive_main_resource_unchanged(self) -> None:
+        raw_archive = CURRENT_WEBARCHIVE.read_bytes()
+        resource = plistlib.loads(raw_archive)["WebMainResource"]
+        expected_html = resource["WebResourceData"].decode(
+            resource["WebResourceTextEncodingName"]
+        )
+        with patch(
+            "src.ratings_hub.collector.fetch_url",
+            side_effect=ChallengeResponseError("client or security challenge"),
+        ):
+            acquired = acquire_ratings_hub_html(webarchive_path=CURRENT_WEBARCHIVE)
+
+        self.assertEqual(acquired.source_format, "webarchive")
+        self.assertEqual(acquired.source_url, resource["WebResourceURL"])
+        self.assertEqual(acquired.html, expected_html)
+        self.assertTrue(is_ratings_hub_html(acquired.html))
+
+    def test_rejects_non_ratings_hub_webarchive_main_resource(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unrelated.webarchive"
+            path.write_bytes(plistlib.dumps({
+                "WebMainResource": {
+                    "WebResourceData": b"<html>unrelated</html>",
+                    "WebResourceMIMEType": "text/html",
+                    "WebResourceTextEncodingName": "UTF-8",
+                    "WebResourceURL": "https://www.attheraces.com/tips/atr-tipsters/ratings-hub",
+                },
+            }))
+
+            with self.assertRaisesRegex(CollectorError, "does not contain a Ratings Hub table"):
+                load_webarchive_html(path)
 
     def test_rejects_arbitrary_html(self) -> None:
         response = MagicMock()
