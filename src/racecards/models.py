@@ -24,6 +24,11 @@ class ParsedRaceRunner:
     course_distance_indicator: str | None = None
     non_runner_status: str | None = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
+    source_horse_url: str | None = None
+    finish_position: str | None = None
+    result_distance_beaten: str | None = None
+    starting_price: str | None = None
+    runner_status: str = "declared_runner"
 
 
 @dataclass(frozen=True)
@@ -49,3 +54,32 @@ class ParsedRace:
     source_heading: str | None = None
     runners: tuple[ParsedRaceRunner, ...] = ()
     raw_payload: dict[str, Any] = field(default_factory=dict)
+    race_date: str | None = None
+    race_status: str | None = None
+
+    @property
+    def starters(self) -> tuple[ParsedRaceRunner, ...]:
+        return tuple(runner for runner in self.runners if runner.runner_status == "confirmed_starter")
+
+    @property
+    def active_field(self) -> tuple[ParsedRaceRunner, ...]:
+        return self.starters
+
+    @property
+    def declared_field(self) -> tuple[ParsedRaceRunner, ...]:
+        return tuple(runner for runner in self.runners if runner.runner_status != "non_runner")
+
+    @property
+    def reserves(self) -> tuple[ParsedRaceRunner, ...]:
+        return tuple(runner for runner in self.runners if runner.runner_status == "reserve")
+
+    @property
+    def non_runners(self) -> tuple[ParsedRaceRunner, ...]:
+        return tuple(
+            runner for runner in self.runners
+            if runner.runner_status == "non_runner" or runner.non_runner_status
+        )
+
+    @property
+    def total_entries(self) -> int:
+        return len(self.runners)
