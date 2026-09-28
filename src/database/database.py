@@ -1,4 +1,5 @@
 import sqlite3
+import re
 from pathlib import Path
 
 
@@ -104,6 +105,131 @@ CREATE TABLE IF NOT EXISTS results (
     UNIQUE(race_id, runner_id)
 );
 
+    CREATE TABLE IF NOT EXISTS result_links (
+        result_link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id INTEGER NOT NULL,
+        result_snapshot_id INTEGER NOT NULL,
+        result_race_observation_id INTEGER NOT NULL,
+        result_runner_observation_id INTEGER NOT NULL,
+        pre_race_snapshot_id INTEGER NOT NULL,
+        pre_race_race_id INTEGER NOT NULL,
+        pre_race_runner_id INTEGER NOT NULL,
+        beaten_distance TEXT,
+        result_status TEXT NOT NULL,
+        dead_heat_group TEXT,
+        FOREIGN KEY (result_id) REFERENCES results(result_id),
+        FOREIGN KEY (result_snapshot_id) REFERENCES result_snapshots(result_snapshot_id),
+        FOREIGN KEY (result_snapshot_id, result_race_observation_id)
+            REFERENCES result_race_observations(result_snapshot_id, result_race_observation_id),
+        FOREIGN KEY (result_snapshot_id, result_runner_observation_id)
+            REFERENCES result_runner_observations(result_snapshot_id, result_runner_observation_id),
+        FOREIGN KEY (pre_race_snapshot_id, pre_race_race_id)
+            REFERENCES races(snapshot_id, race_id),
+        FOREIGN KEY (pre_race_race_id, pre_race_runner_id)
+            REFERENCES runners(race_id, runner_id),
+        UNIQUE(result_runner_observation_id)
+    );
+CREATE INDEX IF NOT EXISTS idx_result_links_snapshot
+    ON result_links(result_snapshot_id);
+
+CREATE INDEX IF NOT EXISTS idx_result_links_pre_race
+    ON result_links(pre_race_snapshot_id, pre_race_race_id, pre_race_runner_id);
+
+CREATE TABLE IF NOT EXISTS result_snapshot_details (
+    result_snapshot_id INTEGER PRIMARY KEY,
+    source_path TEXT,
+    source_format TEXT NOT NULL,
+    source_mime_type TEXT,
+    source_encoding TEXT,
+    source_byte_count INTEGER NOT NULL,
+    source_bytes BLOB,
+    FOREIGN KEY (result_snapshot_id) REFERENCES result_snapshots(result_snapshot_id)
+);
+
+CREATE TABLE IF NOT EXISTS result_snapshots (
+    result_snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    source_url TEXT,
+    notes TEXT,
+    content_sha256 TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS result_race_observations (
+    result_race_observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_snapshot_id INTEGER NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    course TEXT NOT NULL,
+    race_time TEXT NOT NULL,
+    race_number INTEGER,
+    race_name TEXT,
+    race_status TEXT NOT NULL,
+    match_status TEXT NOT NULL CHECK (match_status IN ('unmatched', 'ambiguous', 'matched', 'manually_confirmed')),
+    matched_pre_race_snapshot_id INTEGER,
+    matched_pre_race_race_id INTEGER,
+    evidence_json TEXT,
+    raw_payload_json TEXT,
+    FOREIGN KEY (result_snapshot_id) REFERENCES result_snapshots(result_snapshot_id),
+    FOREIGN KEY (matched_pre_race_snapshot_id, matched_pre_race_race_id)
+        REFERENCES races(snapshot_id, race_id),
+    UNIQUE(result_snapshot_id, snapshot_date, course, race_time, race_number)
+);
+
+CREATE TABLE IF NOT EXISTS result_runner_observations (
+    result_runner_observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_snapshot_id INTEGER NOT NULL,
+    result_race_observation_id INTEGER NOT NULL,
+    horse_number INTEGER,
+    horse_name TEXT NOT NULL,
+    finishing_position INTEGER,
+    beaten_distance TEXT,
+    result_status TEXT NOT NULL,
+    starting_price TEXT,
+    bsp REAL,
+    dead_heat_group TEXT,
+    match_status TEXT NOT NULL CHECK (match_status IN ('unmatched', 'ambiguous', 'matched', 'manually_confirmed')),
+    matched_pre_race_snapshot_id INTEGER,
+    matched_pre_race_race_id INTEGER,
+    matched_pre_race_runner_id INTEGER,
+    evidence_json TEXT,
+    raw_payload_json TEXT,
+    FOREIGN KEY (result_snapshot_id) REFERENCES result_snapshots(result_snapshot_id),
+    FOREIGN KEY (result_snapshot_id, result_race_observation_id)
+        REFERENCES result_race_observations(result_snapshot_id, result_race_observation_id),
+    FOREIGN KEY (matched_pre_race_snapshot_id, matched_pre_race_race_id)
+        REFERENCES races(snapshot_id, race_id),
+    FOREIGN KEY (matched_pre_race_race_id, matched_pre_race_runner_id)
+        REFERENCES runners(race_id, runner_id),
+    UNIQUE(result_race_observation_id, horse_number, horse_name)
+);
+
+CREATE TABLE IF NOT EXISTS result_match_confirmations (
+    confirmation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_snapshot_id INTEGER NOT NULL,
+    result_race_observation_id INTEGER NOT NULL,
+    result_runner_observation_id INTEGER NOT NULL UNIQUE,
+    pre_race_snapshot_id INTEGER NOT NULL,
+    pre_race_race_id INTEGER NOT NULL,
+    pre_race_runner_id INTEGER NOT NULL,
+    confirmed_by TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL,
+    FOREIGN KEY (result_snapshot_id, result_race_observation_id)
+        REFERENCES result_race_observations(result_snapshot_id, result_race_observation_id),
+    FOREIGN KEY (result_snapshot_id, result_runner_observation_id)
+        REFERENCES result_runner_observations(result_snapshot_id, result_runner_observation_id),
+    FOREIGN KEY (pre_race_snapshot_id, pre_race_race_id)
+        REFERENCES races(snapshot_id, race_id),
+    FOREIGN KEY (pre_race_race_id, pre_race_runner_id)
+        REFERENCES runners(race_id, runner_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_result_race_observations_snapshot_id
+    ON result_race_observations(result_snapshot_id, result_race_observation_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_result_runner_observations_snapshot_id
+    ON result_runner_observations(result_snapshot_id, result_runner_observation_id);
+
 CREATE INDEX IF NOT EXISTS idx_races_date
     ON races(race_date);
 
@@ -136,6 +262,12 @@ CREATE INDEX IF NOT EXISTS idx_results_race
 
 CREATE INDEX IF NOT EXISTS idx_results_runner
     ON results(runner_id);
+
+CREATE INDEX IF NOT EXISTS idx_result_race_observations_snapshot
+    ON result_race_observations(result_snapshot_id);
+
+CREATE INDEX IF NOT EXISTS idx_result_runner_observations_race
+    ON result_runner_observations(result_race_observation_id);
 
 CREATE TABLE IF NOT EXISTS racecard_race_details (
     race_id INTEGER PRIMARY KEY,
@@ -262,7 +394,7 @@ _RATINGS_HUB_COLUMNS = (
     "jockey_attribute, attitude, form_plus, form_speed_average, form_minus_speed, "
     "form_plus_minus_form, form_plus_minus_speed"
 )
-_RESULTS_COLUMNS = (
+_LEGACY_RESULTS_COLUMNS = (
     "result_id, race_id, runner_id, finishing_position, result_text, "
     "starting_price, bsp, winner, placed"
 )
@@ -386,8 +518,12 @@ def _rebuild_results(connection: sqlite3.Connection) -> None:
         )"""
     )
     connection.execute(
-        f"INSERT INTO results__integrity_migration ({_RESULTS_COLUMNS}) "
-        f"SELECT {_RESULTS_COLUMNS} FROM results"
+        """INSERT INTO results__integrity_migration
+           (result_id, race_id, runner_id, finishing_position, result_text,
+            starting_price, bsp, winner, placed)
+           SELECT result_id, race_id, runner_id, finishing_position, result_text,
+                  starting_price, bsp, winner, placed
+           FROM results"""
     )
     connection.execute("DROP TABLE results")
     connection.execute(
@@ -445,6 +581,157 @@ def _migrate_relational_integrity(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_result_lineage(connection: sqlite3.Connection) -> None:
+    detail_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(result_snapshot_details)")
+    }
+    if "source_bytes" not in detail_columns:
+        connection.execute(
+            "ALTER TABLE result_snapshot_details ADD COLUMN source_bytes BLOB"
+        )
+
+    previous_sequence = _sequence_value(connection, "result_links")
+    connection.execute("DROP TABLE IF EXISTS result_links__lineage_migration")
+    connection.execute(
+        """CREATE TABLE result_links__lineage_migration (
+            result_link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            result_id INTEGER NOT NULL,
+            result_snapshot_id INTEGER NOT NULL,
+            result_race_observation_id INTEGER NOT NULL,
+            result_runner_observation_id INTEGER NOT NULL,
+            pre_race_snapshot_id INTEGER NOT NULL,
+            pre_race_race_id INTEGER NOT NULL,
+            pre_race_runner_id INTEGER NOT NULL,
+            beaten_distance TEXT,
+            result_status TEXT NOT NULL,
+            dead_heat_group TEXT,
+            FOREIGN KEY (result_id) REFERENCES results(result_id),
+            FOREIGN KEY (result_snapshot_id) REFERENCES result_snapshots(result_snapshot_id),
+            FOREIGN KEY (result_snapshot_id, result_race_observation_id)
+                REFERENCES result_race_observations(result_snapshot_id, result_race_observation_id),
+            FOREIGN KEY (result_snapshot_id, result_runner_observation_id)
+                REFERENCES result_runner_observations(result_snapshot_id, result_runner_observation_id),
+            FOREIGN KEY (pre_race_snapshot_id, pre_race_race_id)
+                REFERENCES races(snapshot_id, race_id),
+            FOREIGN KEY (pre_race_race_id, pre_race_runner_id)
+                REFERENCES runners(race_id, runner_id),
+            UNIQUE(result_runner_observation_id)
+        )"""
+    )
+    connection.execute(
+        """INSERT INTO result_links__lineage_migration
+           (result_link_id, result_id, result_snapshot_id, result_race_observation_id,
+            result_runner_observation_id, pre_race_snapshot_id, pre_race_race_id,
+            pre_race_runner_id, beaten_distance, result_status, dead_heat_group)
+           SELECT result_link_id, result_id, result_snapshot_id, result_race_observation_id,
+                  result_runner_observation_id, pre_race_snapshot_id, pre_race_race_id,
+                  pre_race_runner_id, beaten_distance, result_status, dead_heat_group
+           FROM result_links"""
+    )
+    connection.execute("DROP TABLE result_links")
+    connection.execute(
+        "ALTER TABLE result_links__lineage_migration RENAME TO result_links"
+    )
+    connection.execute(
+        "CREATE INDEX idx_result_links_snapshot ON result_links(result_snapshot_id)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_result_links_pre_race "
+        "ON result_links(pre_race_snapshot_id, pre_race_race_id, pre_race_runner_id)"
+    )
+    _restore_sequence(connection, "result_links", previous_sequence)
+
+
+def _install_result_triggers(connection: sqlite3.Connection) -> None:
+    for action in ("INSERT", "UPDATE"):
+        trigger_name = f"validate_result_link_match_{action.lower()}"
+        connection.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+        connection.execute(
+            f"""CREATE TRIGGER {trigger_name}
+                BEFORE {action} ON result_links
+                FOR EACH ROW
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM result_race_observations race_observation
+                    JOIN result_runner_observations runner_observation
+                      ON runner_observation.result_snapshot_id = race_observation.result_snapshot_id
+                     AND runner_observation.result_race_observation_id = race_observation.result_race_observation_id
+                    JOIN results canonical_result
+                      ON canonical_result.result_id = NEW.result_id
+                                        WHERE race_observation.result_snapshot_id = NEW.result_snapshot_id
+                      AND race_observation.result_race_observation_id = NEW.result_race_observation_id
+                                            AND race_observation.race_status = 'completed'
+                      AND runner_observation.result_snapshot_id = NEW.result_snapshot_id
+                      AND runner_observation.result_runner_observation_id = NEW.result_runner_observation_id
+                                            AND (
+                                                    (race_observation.match_status IN ('matched', 'manually_confirmed')
+                                                     AND race_observation.matched_pre_race_snapshot_id = NEW.pre_race_snapshot_id
+                                                     AND race_observation.matched_pre_race_race_id = NEW.pre_race_race_id
+                                                     AND runner_observation.match_status IN ('matched', 'manually_confirmed')
+                                                     AND runner_observation.matched_pre_race_snapshot_id = NEW.pre_race_snapshot_id
+                                                     AND runner_observation.matched_pre_race_race_id = NEW.pre_race_race_id
+                                                     AND runner_observation.matched_pre_race_runner_id = NEW.pre_race_runner_id)
+                                                    OR EXISTS (
+                                                            SELECT 1 FROM result_match_confirmations confirmation
+                                                            WHERE confirmation.result_snapshot_id = NEW.result_snapshot_id
+                                                                AND confirmation.result_race_observation_id = NEW.result_race_observation_id
+                                                                AND confirmation.result_runner_observation_id = NEW.result_runner_observation_id
+                                                                AND confirmation.pre_race_snapshot_id = NEW.pre_race_snapshot_id
+                                                                AND confirmation.pre_race_race_id = NEW.pre_race_race_id
+                                                                AND confirmation.pre_race_runner_id = NEW.pre_race_runner_id
+                                                    )
+                                            )
+                      AND canonical_result.race_id = NEW.pre_race_race_id
+                      AND canonical_result.runner_id = NEW.pre_race_runner_id
+                      AND canonical_result.finishing_position IS runner_observation.finishing_position
+                      AND canonical_result.result_text IS runner_observation.result_status
+                      AND canonical_result.starting_price IS runner_observation.starting_price
+                      AND canonical_result.bsp IS runner_observation.bsp
+                      AND canonical_result.winner IS CASE WHEN runner_observation.finishing_position = 1 THEN 1 ELSE 0 END
+                      AND canonical_result.placed IS CASE
+                          WHEN runner_observation.finishing_position IS NOT NULL
+                           AND runner_observation.finishing_position <= 3 THEN 1 ELSE 0 END
+                      AND NEW.result_status IS runner_observation.result_status
+                      AND NEW.beaten_distance IS runner_observation.beaten_distance
+                      AND NEW.dead_heat_group IS runner_observation.dead_heat_group
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'canonical result link does not match explicitly matched observations');
+                END"""
+        )
+
+    for table in (
+        "result_snapshots",
+        "result_snapshot_details",
+        "result_race_observations",
+        "result_runner_observations",
+        "result_match_confirmations",
+        "result_links",
+    ):
+        for action in ("UPDATE", "DELETE"):
+            trigger_name = f"immutable_{table}_{action.lower()}"
+            connection.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+            connection.execute(
+                f"""CREATE TRIGGER {trigger_name}
+                    BEFORE {action} ON {table}
+                    BEGIN
+                        SELECT RAISE(ABORT, '{table} rows are immutable');
+                    END"""
+            )
+
+    for action in ("UPDATE", "DELETE"):
+        trigger_name = f"immutable_linked_result_{action.lower()}"
+        connection.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+        connection.execute(
+            f"""CREATE TRIGGER {trigger_name}
+                BEFORE {action} ON results
+                WHEN EXISTS (SELECT 1 FROM result_links WHERE result_id = OLD.result_id)
+                BEGIN
+                    SELECT RAISE(ABORT, 'canonical results with lineage are immutable');
+                END"""
+        )
+
+
 def initialise_database(database_path: str | Path = DATABASE_PATH):
     database_path = Path(database_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -454,9 +741,25 @@ def initialise_database(database_path: str | Path = DATABASE_PATH):
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
-        for statement in SCHEMA.split(";"):
-            if statement.strip():
-                connection.execute(statement)
+        statements: list[str] = []
+        current: list[str] = []
+        trigger_statement = False
+        for line in SCHEMA.splitlines(keepends=True):
+            current.append(line)
+            if "CREATE TRIGGER" in "".join(current).upper():
+                trigger_statement = True
+            if trigger_statement:
+                complete = bool(re.search(r"\nEND;\s*$", "".join(current)))
+            else:
+                complete = line.rstrip().endswith(";")
+            if complete:
+                statements.append("".join(current))
+                current = []
+                trigger_statement = False
+        if current and "".join(current).strip():
+            statements.append("".join(current))
+        for statement in statements:
+            connection.execute(statement)
 
         snapshot_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(snapshots)")
@@ -469,13 +772,44 @@ def initialise_database(database_path: str | Path = DATABASE_PATH):
             )
 
         migration_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if migration_version > 1:
+        if migration_version > 4:
             raise RuntimeError(
-                f"Database migration version {migration_version} is newer than supported version 1."
+            f"Database migration version {migration_version} is newer than supported version 4."
             )
         if migration_version < 1:
             _migrate_relational_integrity(connection)
             connection.execute("PRAGMA user_version = 1")
+            migration_version = 1
+
+        if migration_version < 2:
+            required_result_tables = {
+                "result_snapshots",
+                "result_links",
+                "result_snapshot_details",
+                "result_race_observations",
+                "result_runner_observations",
+            }
+            existing_tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            missing_tables = required_result_tables - existing_tables
+            if missing_tables:
+                raise sqlite3.IntegrityError(
+                    f"Results schema migration is incomplete: missing {sorted(missing_tables)!r}"
+                )
+            connection.execute("PRAGMA user_version = 2")
+
+        if migration_version < 3:
+            _migrate_result_lineage(connection)
+            connection.execute("PRAGMA user_version = 3")
+            migration_version = 3
+
+        if migration_version < 4:
+            _install_result_triggers(connection)
+            connection.execute("PRAGMA user_version = 4")
 
         violations = connection.execute("PRAGMA foreign_key_check").fetchall()
         if violations:

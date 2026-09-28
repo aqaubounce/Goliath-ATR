@@ -416,7 +416,7 @@ class RatingsHubIngestionTests(unittest.TestCase):
                 for table in tables
             }
             self.assertEqual(after, before)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertEqual(
                 connection.execute(
